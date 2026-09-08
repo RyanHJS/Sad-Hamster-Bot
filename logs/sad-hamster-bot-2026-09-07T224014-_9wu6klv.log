@@ -1,0 +1,9 @@
+2026-09-07 22:40:14,363 INFO sad_hamster_bot: Starting Sad Hamster Bot log_file=/Users/ryanhe/Documents/Borealis/DEV/sad-hamster-bot/logs/sad-hamster-bot-2026-09-07T224014-_9wu6klv.log
+2026-09-07 22:40:14,364 WARNING discord.client: PyNaCl is not installed, voice will NOT be supported
+2026-09-07 22:40:14,364 WARNING discord.client: davey is not installed, voice will NOT be supported
+2026-09-07 22:40:14,364 INFO discord.client: logging in using static token
+2026-09-07 22:40:15,586 INFO discord.gateway: Shard ID None has connected to Gateway (Session ID: ed3dff2e02825bb9df3b32db6a11cb13).
+2026-09-07 22:40:17,588 INFO sad_hamster_bot: Ready as Sad Hamster Bot#5296 in channel 1546671772504694854
+2026-09-07 22:40:54,610 INFO sad_hamster_bot: Starting request message_id=1546757203187335219
+2026-09-07 22:42:16,073 INFO sad_hamster_bot: Codex finished status=0
+2026-09-07 22:44:12,589 INFO sad_hamster_bot: Starting request message_id=1546758033575780444

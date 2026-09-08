@@ -1,11 +1,25 @@
+Metadata-Version: 2.4
+Name: sad-hamster-bot
+Version: 0.1.0
+Summary: A private Discord bridge to the Codex CLI
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: discord.py<3,>=2.5
+Requires-Dist: python-dotenv<2,>=1.2
+Provides-Extra: dev
+Requires-Dist: ruff<1,>=0.12; extra == "dev"
+Requires-Dist: build<2,>=1.2; extra == "dev"
+
 # Sad Hamster Bot
 
 A small, private Discord bot that sends your requests to the local Codex CLI.
-It works with any local workspace.
+It works with any workspace. Job Companion is one possible target and is not
+a dependency.
 
-Send a request in the configured channel. It replies with a compact summary of
-model, reasoning effort, token usage, and elapsed execution time, then the final
-answer. Startup banners, echoed prompts, and tool output stay out of Discord.
+Mention the bot with a request. It replies with a mention of you, a compact
+summary of model, reasoning effort, token usage, and elapsed execution time,
+then the final answer once. Startup banners, echoed prompts, and tool output
+stay out of Discord.
 
 ## Setup
 
@@ -31,27 +45,17 @@ In Discord, enable Developer Mode and copy your user ID and the channel ID.
 Put those IDs and the bot token in `.env`. Set `CODEX_WORKDIR` to the directory
 you want Codex to work in. Keep `.env` private; Git ignores it.
 
-## Start the bot
-
-After creating `.env` and installing the package, start the bot from this
-directory with:
-
 ```sh
 .venv/bin/sad-hamster-bot --check
 .venv/bin/sad-hamster-bot
 ```
 
-The first command validates configuration. The second command connects to
-Discord and keeps the bot running; leave that terminal open. Stop it with
-Ctrl-C. To use a different environment file, run
-`.venv/bin/sad-hamster-bot --env-file /path/to/.env`.
-
 `--check` validates local configuration and finds the executable without
 connecting to Discord or using Codex tokens. It does not verify authentication.
-In Discord, send a request in the configured channel:
+In Discord, select the bot from the mention autocomplete, then send a request:
 
 ```text
-summarize this project's README
+@Sad Hamster Bot summarize this project's README
 ```
 
 Only the configured user in the configured channel can invoke Codex, and only
@@ -75,7 +79,7 @@ chosen file; `~` expands to your home directory. Shell substitutions such as
 | `DISCORD_CHANNEL_ID` | Required | The one authorized channel |
 | `CODEX_WORKDIR` | Required | Existing target workspace |
 | `CODEX_BIN` | `codex` | Executable name or path, without arguments |
-| `CODEX_TIMEOUT_SECONDS` | `30` | Positive, finite execution timeout |
+| `CODEX_TIMEOUT_SECONDS` | `120` | Positive, finite execution timeout |
 | `CODEX_MODEL` | Codex default | Optional model override |
 | `CODEX_REASONING_EFFORT` | Codex default | Optional effort supported by your model |
 | `DISCORD_LOG_DIR` | `logs` | Directory for per-launch logs |
@@ -89,6 +93,25 @@ passes the request through stdin. A custom `CODEX_BIN` wrapper must preserve
 the standard text output mode and separate stdout from stderr. JSON output
 is not supported. The old `CODEX_COMMAND` setting has been replaced by
 `CODEX_BIN`, `CODEX_MODEL`, and `CODEX_REASONING_EFFORT`.
+
+## Using Job Companion
+
+Keep the two projects side by side:
+
+```text
+DEV/
+  sad-hamster-bot/
+  job-companion/
+```
+
+Set `CODEX_WORKDIR=../job-companion` in the bot's `.env`. Install Job Companion
+separately using its README. Codex can then work in that directory and invoke
+its CLI. Point `CODEX_WORKDIR` elsewhere to use a different project.
+
+When migrating from the old bot, stop its process before starting this one
+to prevent duplicate replies. Transfer your existing `DISCORD_*` values into
+the new `.env`. Historical logs remain in Job Companion's `logs/` directory;
+new logs belong to this project.
 
 ## Operation and Troubleshooting
 

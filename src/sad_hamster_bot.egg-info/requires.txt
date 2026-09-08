@@ -1,0 +1,6 @@
+discord.py<3,>=2.5
+python-dotenv<2,>=1.2
+
+[dev]
+ruff<1,>=0.12
+build<2,>=1.2

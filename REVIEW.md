@@ -1,6 +1,6 @@
 # Extraction Review
 
-Reviewed September 7, 2026. Scope: the former Job Companion Discord bridge
+Reviewed September 7, 2026. Scope: the Sad Hamster Discord bot
 and this standalone replacement. An independent read-only review covered the
 original and extracted code.
 
@@ -16,7 +16,7 @@ original and extracted code.
 | `.env` was not loaded | Use python-dotenv, environment precedence, and file-relative paths |
 | Direct `Client.start()` bypassed managed client shutdown | Use discord.py's `Client.run()` |
 | Delivery errors and unexpected runner failures had little recovery coverage | Handle delivery failures, release the lock, and provide clean failure replies |
-| Bot code, dependencies, tests, and setup lived in Job Companion | Own package, console entry point, configuration template, README, and CI |
+| Bot code, dependencies, tests, and setup | Own package, console entry point, configuration template, README, and CI |
 
 The extraction also removed repetitive ignored-message logging, the command
 string parsing and bare-command repair path, the file-name collision loop,

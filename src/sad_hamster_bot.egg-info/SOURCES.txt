@@ -1,0 +1,13 @@
+.env.example
+MANIFEST.in
+README.md
+REVIEW.md
+pyproject.toml
+src/sad_hamster_bot.py
+src/sad_hamster_bot.egg-info/PKG-INFO
+src/sad_hamster_bot.egg-info/SOURCES.txt
+src/sad_hamster_bot.egg-info/dependency_links.txt
+src/sad_hamster_bot.egg-info/entry_points.txt
+src/sad_hamster_bot.egg-info/requires.txt
+src/sad_hamster_bot.egg-info/top_level.txt
+tests/test_bot.py

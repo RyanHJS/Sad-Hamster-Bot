@@ -1,12 +1,12 @@
-.env
-.env.*
+.env                 # Local secrets and bot credentials
+.env.*               # Environment-specific secret files
 !.env.example
-.venv/
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
-.ruff_cache/
-logs/
-.DS_Store
+.venv/               # Local virtual environment
+__pycache__/         # Python bytecode cache
+*.py[cod]            # Compiled Python artifacts
+*.egg-info/          # Editable-install metadata
+build/               # Package build output
+dist/                # Distribution archives
+.ruff_cache/         # Ruff lint cache
+logs/                # Runtime logs may contain local diagnostics
+.DS_Store            # macOS filesystem metadata

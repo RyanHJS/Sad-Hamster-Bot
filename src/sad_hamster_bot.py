@@ -16,6 +16,7 @@ from time import monotonic
 
 import discord
 from dotenv import dotenv_values
+from models import CodexResult
 
 log = logging.getLogger("sad_hamster_bot")
 
@@ -28,7 +29,11 @@ class Settings:
     workdir: Path
     log_dir: Path
     codex_bin: str
-    timeout: float = 120
+    timeout: float = 30
+    models: tuple[tuple[str, str], ...] = (("gpt-6-astra", "low"), ("gpt-5.6-luna", "medium"), ("gpt-5.6-sol", "low"), ("gpt-5.6-terra", "low"), ("gpt-5.5", "low"))
+    retries: int = 3
+    output_limit: int = 1024 * 1024
+    chunk_size: int = 1900
     model: str = ""
     reasoning: str = ""
 
@@ -53,7 +58,7 @@ class Settings:
             return (env_file.parent / Path(value).expanduser()).resolve()
 
         try:
-            timeout = float(values.get("CODEX_TIMEOUT_SECONDS", "120"))
+            timeout = float(values.get("CODEX_TIMEOUT_SECONDS", "30"))
         except (TypeError, ValueError):
             raise ValueError("CODEX_TIMEOUT_SECONDS must be a number") from None
         if not math.isfinite(timeout) or timeout <= 0:
@@ -67,9 +72,20 @@ class Settings:
         executable = shutil.which(executable)
         if not executable:
             raise ValueError("CODEX_BIN must name an installed executable")
-        reasoning = values.get("CODEX_REASONING_EFFORT") or ""
-        if reasoning not in ("", "none", "minimal", "low", "medium", "high", "xhigh", "max"):
-            raise ValueError("CODEX_REASONING_EFFORT is not a recognized effort level")
+        raw_models = values.get("CODEX_MODELS") or "gpt-6-astra:low,gpt-5.6-luna:medium,gpt-5.6-sol:low,gpt-5.6-terra:low,gpt-5.5:low"
+        efforts = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+        try:
+            models = tuple((name.strip(), effort.strip()) for name, effort in (item.split(":", 1) for item in raw_models.split(",")))
+        except ValueError:
+            raise ValueError("CODEX_MODELS must be comma-separated model:reasoning entries") from None
+        if not models or any(not name or effort not in efforts for name, effort in models):
+            raise ValueError("CODEX_MODELS contains an invalid model or reasoning effort")
+        try:
+            retries = int(values.get("CODEX_RETRIES", "3"))
+        except ValueError:
+            raise ValueError("CODEX_RETRIES must be a non-negative integer") from None
+        if retries < 0:
+            raise ValueError("CODEX_RETRIES must be a non-negative integer")
         return cls(
             required("DISCORD_BOT_TOKEN"),
             identifier("DISCORD_USER_ID"),
@@ -78,8 +94,9 @@ class Settings:
             path(values.get("DISCORD_LOG_DIR") or "logs"),
             executable,
             timeout,
-            values.get("CODEX_MODEL") or "",
-            reasoning,
+            models, retries,
+            int(values.get("CODEX_OUTPUT_LIMIT", 1024 * 1024)),
+            int(values.get("DISCORD_CHUNK_SIZE", 1900)),
         )
 
 
@@ -95,21 +112,6 @@ def configure_logging(directory: Path) -> Path:
         force=True,
     )
     return Path(filename)
-
-
-@dataclass(frozen=True)
-class CodexResult:
-    message: str
-    elapsed: float
-    model: str = "unavailable"
-    reasoning: str = "unavailable"
-    tokens: str = "unavailable"
-
-    def format(self, user_id: int) -> str:
-        return (
-            f"<@{user_id}>\n**Model:** {self.model} | **Reasoning:** {self.reasoning} | "
-            f"**Tokens:** {self.tokens} | **Time:** {self.elapsed:.1f}s\n\n{self.message}"
-        )
 
 
 class OutputLimitExceeded(Exception):
@@ -149,7 +151,7 @@ async def run_codex(prompt: str, settings: Settings) -> CodexResult:
             "Codex could not start. Check its executable and workspace.", monotonic() - started
         )
     tasks = [
-        asyncio.create_task(read_output(stream)) for stream in (process.stdout, process.stderr)
+        asyncio.create_task(read_output(stream, settings.output_limit)) for stream in (process.stdout, process.stderr)
     ]
     tasks.append(asyncio.create_task(process.wait()))
     try:
@@ -192,6 +194,27 @@ async def run_codex(prompt: str, settings: Settings) -> CodexResult:
     )
 
 
+async def run_with_fallback(prompt: str, settings: Settings) -> CodexResult:
+    last = None
+    retries = 0
+    for model, reasoning in settings.models:
+        for attempt in range(settings.retries + 1):
+            result = await run_codex(prompt, settings.__class__(**{**settings.__dict__, "models": settings.models, "model": model, "reasoning": reasoning}))
+            result = CodexResult(result.message, result.elapsed, result.model, result.reasoning, result.tokens, retries)
+            last = result
+            if result.message != "Codex timed out.":
+                return result
+            retries += 1
+    return last
+
+
+def discord_format(text: str) -> str:
+    lines = text.splitlines()
+    if any("|" in line and re.match(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$", line) for line in lines):
+        return "```\n" + text.replace("```", "``\\u200b`") + "\n```"
+    return text
+
+
 class CodexBot(discord.Client):
     def __init__(self, settings: Settings):
         intents = discord.Intents.default()
@@ -209,7 +232,6 @@ class CodexBot(discord.Client):
             or message.author.id != self.settings.user_id
             or message.channel.id != self.settings.channel_id
             or self.user is None
-            or not any(user.id == self.user.id for user in message.mentions)
         ):
             return
         prompt = re.sub(rf"<@!?{self.user.id}>", "", message.content).strip()
@@ -224,16 +246,16 @@ class CodexBot(discord.Client):
                 log.info("Starting request message_id=%d", message.id)
                 try:
                     async with message.channel.typing():
-                        result = await run_codex(prompt, self.settings)
+                        result = await run_with_fallback(prompt, self.settings)
                 except Exception as exc:
                     log.error(
                         "Request failed message_id=%d type=%s", message.id, type(exc).__name__
                     )
                     result = CodexResult("The request failed unexpectedly. Check the bot logs.", 0)
-                text = result.format(message.author.id)
-                for start in range(0, len(text), 1900):
+                text = discord_format(result.format())
+                for start in range(0, len(text), self.settings.chunk_size):
                     await message.channel.send(
-                        text[start : start + 1900],
+                        text[start : start + self.settings.chunk_size],
                         allowed_mentions=discord.AllowedMentions(
                             users=[message.author] if start == 0 else False,
                             roles=False,
