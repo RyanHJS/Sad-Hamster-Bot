@@ -1,0 +1,145 @@
+# Sad Hamster Bot
+
+A small, private Discord bot that sends your requests to the local Codex CLI.
+It works with any workspace. Job Companion is one possible target and is not
+a dependency.
+
+Mention the bot with a request. It replies with a mention of you, a compact
+summary of model, reasoning effort, token usage, and elapsed execution time,
+then the final answer once. Startup banners, echoed prompts, and tool output
+stay out of Discord.
+
+## Setup
+
+Requires macOS or Linux, Python 3.12+, and an installed, authenticated
+[Codex CLI](https://developers.openai.com/codex/cli/).
+Run `codex login` and confirm `codex exec --help` works before starting the bot.
+The bot uses Codex's existing authentication and sandbox configuration.
+
+From this directory:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+cp .env.example .env
+```
+
+Create an application in the [Discord Developer Portal](https://discord.com/developers/applications)
+and add a bot. Enable **Message Content Intent** in the bot settings. Use the
+OAuth2 URL Generator with the `bot` scope and **View Channels** and **Send
+Messages** permissions to invite it to your server.
+
+In Discord, enable Developer Mode and copy your user ID and the channel ID.
+Put those IDs and the bot token in `.env`. Set `CODEX_WORKDIR` to the directory
+you want Codex to work in. Keep `.env` private; Git ignores it.
+
+```sh
+.venv/bin/sad-hamster-bot --check
+.venv/bin/sad-hamster-bot
+```
+
+`--check` validates local configuration and finds the executable without
+connecting to Discord or using Codex tokens. It does not verify authentication.
+In Discord, select the bot from the mention autocomplete, then send a request:
+
+```text
+@Sad Hamster Bot summarize this project's README
+```
+
+Only the configured user in the configured channel can invoke Codex, and only
+one request runs at a time. Busy requests are rejected, not queued. Each request
+starts a fresh Codex session. Stop with Ctrl-C; restart after changing code or
+configuration. The Discord display name and profile picture are set separately
+in the Developer Portal.
+
+## Configuration
+
+Settings load from `.env` in the launch directory. Use
+`sad-hamster-bot --env-file /path/to/.env` when launching elsewhere. Existing
+environment variables take precedence. Relative paths resolve against the
+chosen file; `~` expands to your home directory. Shell substitutions such as
+`$PWD` are not expanded in the file.
+
+| Setting | Required / Default | Purpose |
+| --- | --- | --- |
+| `DISCORD_BOT_TOKEN` | Required | Discord bot token |
+| `DISCORD_USER_ID` | Required | The one authorized user |
+| `DISCORD_CHANNEL_ID` | Required | The one authorized channel |
+| `CODEX_WORKDIR` | Required | Existing target workspace |
+| `CODEX_BIN` | `codex` | Executable name or path, without arguments |
+| `CODEX_TIMEOUT_SECONDS` | `120` | Positive, finite execution timeout |
+| `CODEX_MODEL` | Codex default | Optional model override |
+| `CODEX_REASONING_EFFORT` | Codex default | Optional effort supported by your model |
+| `DISCORD_LOG_DIR` | `logs` | Directory for per-launch logs |
+
+Supported effort settings are `none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, and `max`; the selected model and installed Codex version must support
+the value. All other Codex settings remain in your Codex configuration.
+
+The bridge invokes `codex exec --skip-git-repo-check --color never -` and
+passes the request through stdin. A custom `CODEX_BIN` wrapper must preserve
+the standard text output mode and separate stdout from stderr. JSON output
+is not supported. The old `CODEX_COMMAND` setting has been replaced by
+`CODEX_BIN`, `CODEX_MODEL`, and `CODEX_REASONING_EFFORT`.
+
+## Using Job Companion
+
+Keep the two projects side by side:
+
+```text
+DEV/
+  sad-hamster-bot/
+  job-companion/
+```
+
+Set `CODEX_WORKDIR=../job-companion` in the bot's `.env`. Install Job Companion
+separately using its README. Codex can then work in that directory and invoke
+its CLI. Point `CODEX_WORKDIR` elsewhere to use a different project.
+
+When migrating from the old bot, stop its process before starting this one
+to prevent duplicate replies. Transfer your existing `DISCORD_*` values into
+the new `.env`. Historical logs remain in Job Companion's `logs/` directory;
+new logs belong to this project.
+
+## Operation and Troubleshooting
+
+The authorized Discord user can request whatever your local Codex configuration
+allows, including workspace changes. Run this as a private bot on a trusted
+machine. The bot does not change Codex's approval or sandbox settings, and does
+not pass `DISCORD_*` environment variables to the Codex process.
+
+Each launch creates a separate timestamped log with request IDs and status,
+without recording prompts, responses, or raw Codex diagnostics. Logs are not
+automatically rotated; remove old files as needed. Codex itself may retain
+sessions according to its own configuration.
+
+- No reply: check the configured IDs, Message Content Intent, channel
+  permissions, and that you selected an actual bot mention.
+- Startup configuration error: fix the named setting and rerun `--check`.
+- Codex failure: check `codex login` and run Codex directly in the configured
+  workspace to inspect its error. The bot does not automatically retry tasks
+  because they may already have changed files.
+- Timeout: increase `CODEX_TIMEOUT_SECONDS` for longer tasks. Timeouts and
+  shutdown kill Codex's process group, including ordinary child tools. Tools
+  that deliberately detach into another process group are outside that cleanup.
+- Output limit: each output stream is capped at 1 MiB; exceeding it stops the
+  run. Ask for a smaller result. Long answers are sent in 1,900-character chunks.
+- Metadata says `unavailable`: the installed CLI did not emit a recognized
+  field. Metadata parsing is best effort; the final answer remains separate.
+- Discord delivery failure: the log records the message ID and HTTP status;
+  the next request can still run. There is no persistent queue or reply retry.
+
+## Development
+
+```sh
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/ruff check .
+.venv/bin/python -m build
+```
+
+There are two runtime dependencies: `discord.py` and `python-dotenv`. The single
+runtime module contains validated settings, subprocess execution, reply
+formatting, and the Discord client. Tests exercise real local subprocesses as
+well as mocked Discord delivery; they need no token or network access. CI runs
+tests, lint, and package builds on Linux and macOS.
