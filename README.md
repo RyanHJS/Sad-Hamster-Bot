@@ -3,6 +3,10 @@
 A small, private Discord bot that sends your requests to the local Codex CLI.
 It works with any local workspace.
 
+The bot starts and continues long-running Codex sessions from Discord. It
+acknowledges work immediately, streams safe progress events, and keeps jobs and
+results in private local state; see [TODO](TODO.md) for future improvements.
+
 Send a request in the configured channel. It replies with a compact summary of
 model, reasoning effort, token usage, and elapsed execution time, then the final
 answer. Startup banners, echoed prompts, and tool output stay out of Discord.
@@ -56,7 +60,8 @@ summarize this project's README
 
 Only the configured user in the configured channel can invoke Codex, and only
 one request runs at a time. Busy requests are rejected, not queued. Each request
-starts a fresh Codex session. Stop with Ctrl-C; restart after changing code or
+continues the selected Codex session; use `session new` for unrelated context.
+Stop with Ctrl-C; restart after changing code or
 configuration. The Discord display name and profile picture are set separately
 in the Developer Portal.
 
@@ -75,20 +80,45 @@ chosen file; `~` expands to your home directory. Shell substitutions such as
 | `DISCORD_CHANNEL_ID` | Required | The one authorized channel |
 | `CODEX_WORKDIR` | Required | Existing target workspace |
 | `CODEX_BIN` | `codex` | Executable name or path, without arguments |
-| `CODEX_TIMEOUT_SECONDS` | `30` | Positive, finite execution timeout |
+| `CODEX_MAX_RUN_SECONDS` | `0` | Optional overall deadline; zero permits long-running tasks |
 | `CODEX_MODEL` | Codex default | Optional model override |
 | `CODEX_REASONING_EFFORT` | Codex default | Optional effort supported by your model |
 | `DISCORD_LOG_DIR` | `logs` | Directory for per-launch logs |
+| `BOT_STATE_DIR` | `state` | Private SQLite job/session state |
 
 Supported effort settings are `none`, `minimal`, `low`, `medium`, `high`,
 `xhigh`, and `max`; the selected model and installed Codex version must support
 the value. All other Codex settings remain in your Codex configuration.
 
-The bridge invokes `codex exec --skip-git-repo-check --color never -` and
-passes the request through stdin. A custom `CODEX_BIN` wrapper must preserve
-the standard text output mode and separate stdout from stderr. JSON output
-is not supported. The old `CODEX_COMMAND` setting has been replaced by
-`CODEX_BIN`, `CODEX_MODEL`, and `CODEX_REASONING_EFFORT`.
+The bridge invokes Codex in JSON event mode and passes the request through
+stdin. Follow-ups use `codex exec resume <session-id> -`; the session ID is
+stored in the private SQLite database under `BOT_STATE_DIR`. `session new`
+starts an unrelated conversation, while `session list` and `session resume
+<id>` select saved conversations. A custom `CODEX_BIN` wrapper must preserve
+JSONL stdout and separate stderr from stdout.
+
+Mention the bot with `status`, `cancel`, or `result <job-id>` while a task is
+running. Requests receive an immediate acknowledgment and periodic status
+updates. A zero `CODEX_MAX_RUN_SECONDS` allows long-running work; startup and
+idle warnings describe what the bot has observed without killing a quiet agent.
+
+## Discord Help
+
+Use `/help` for an ephemeral command reference. Mentioning the bot without a
+request sends the same guide:
+
+```text
+@SadHamsterBot summarize the deployment configuration
+@SadHamsterBot status
+@SadHamsterBot cancel
+@SadHamsterBot result <job-id>
+@SadHamsterBot session new unrelated investigation
+@SadHamsterBot session list
+@SadHamsterBot session resume <session-id>
+```
+
+Slash commands require the application command scope when inviting the bot.
+Mention-based requests still require Message Content Intent.
 
 ## Operation and Troubleshooting
 
@@ -108,13 +138,15 @@ sessions according to its own configuration.
 - Codex failure: check `codex login` and run Codex directly in the configured
   workspace to inspect its error. The bot does not automatically retry tasks
   because they may already have changed files.
-- Timeout: increase `CODEX_TIMEOUT_SECONDS` for longer tasks. Timeouts and
-  shutdown kill Codex's process group, including ordinary child tools. Tools
+- Timeout: `CODEX_MAX_RUN_SECONDS` is an optional overall deadline. It does not
+  mean Codex failed to connect; the status reports whether agent activity was
+  observed and whether server acceptance is unknown. Deadlines and shutdown
+  kill Codex's process group, including ordinary child tools. Tools
   that deliberately detach into another process group are outside that cleanup.
 - Output limit: each output stream is capped at 1 MiB; exceeding it stops the
   run. Ask for a smaller result. Long answers are sent in 1,900-character chunks.
-- Metadata says `unavailable`: the installed CLI did not emit a recognized
-  field. Metadata parsing is best effort; the final answer remains separate.
+- Metadata says `unavailable`: the CLI did not emit that field. The attempted
+  model and effort remain visible in the job result, including failed attempts.
 - Discord delivery failure: the log records the message ID and HTTP status;
   the next request can still run. There is no persistent queue or reply retry.
 
