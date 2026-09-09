@@ -6,12 +6,25 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import codex_runner as runner
 
 
 class RunnerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cleanup_does_not_hide_permission_denial_for_live_child(self):
+        process = SimpleNamespace(
+            pid=123,
+            returncode=None,
+            stdout=asyncio.StreamReader(),
+            stderr=asyncio.StreamReader(),
+            wait=AsyncMock(),
+        )
+        with patch.object(runner.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                await runner._cleanup(process, 0.05)
+        process.wait.assert_not_awaited()
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -149,6 +162,22 @@ class RunnerTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(result.state, state)
                 self.assertNotIn("SECRET", result.message)
+
+    async def test_cleanup_permission_error_does_not_mask_protocol_failure(self):
+        source = (
+            self.emit({"type": "turn.completed", "usage": {"input_tokens": -1, "output_tokens": 1}})
+            + "time.sleep(30)\n"
+        )
+        killpg = runner.os.killpg
+
+        def signal_group(pid, sig):
+            if sig == 0:
+                raise PermissionError
+            return killpg(pid, sig)
+
+        with patch.object(runner.os, "killpg", side_effect=signal_group):
+            result = await asyncio.wait_for(self.run_cli(source), 2)
+        self.assertEqual(result.state, "protocol_error")
 
     async def test_bounds_and_stderr_drain(self):
         result = await asyncio.wait_for(

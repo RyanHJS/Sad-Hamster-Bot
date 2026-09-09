@@ -64,20 +64,28 @@ async def _drain(stream):
 
 async def _cleanup(process, grace):
     # The group can outlive its leader, so returncode alone is insufficient.
-    def send(sig):
+    async def send(sig):
         try:
             os.killpg(process.pid, sig)
             return True
         except ProcessLookupError:
             return False
+        except PermissionError:
+            # Darwin can deny signals during process-group teardown. Allow the
+            # child watcher to report exit, but never hide denial for a live child.
+            for _ in range(10):
+                if process.returncode is not None:
+                    return False
+                await asyncio.sleep(0.01)
+            raise
 
     drains = [asyncio.create_task(_drain(stream)) for stream in (process.stdout, process.stderr)]
     try:
-        if send(signal.SIGTERM):
+        if await send(signal.SIGTERM):
             deadline = monotonic() + max(0, grace)
-            while send(0) and monotonic() < deadline:
+            while monotonic() < deadline and await send(0):
                 await asyncio.sleep(min(0.02, max(0, deadline - monotonic())))
-            send(signal.SIGKILL)
+            await send(signal.SIGKILL)
         await process.wait()
     finally:
         for task in drains:
