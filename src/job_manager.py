@@ -1,11 +1,13 @@
 """Own execution independently of Discord delivery."""
 
 import asyncio
+import logging
 import sqlite3
-from dataclasses import replace
 from time import monotonic
 
 from codex_runner import run_codex
+
+log = logging.getLogger("sad_hamster_bot.jobs")
 
 ACTIVE = {"accepted", "starting", "running", "cancelling"}
 
@@ -90,11 +92,11 @@ class JobManager:
             lines.append(job["activity"])
         return "\n".join(lines)
 
-    async def execute(self, job, prompt, model_index=0):
+    async def execute(self, job, prompt):
         job_id = job["id"]
         started = monotonic()
-        model, reasoning = self.settings.models[model_index]
-        settings = replace(self.settings, model=model, reasoning=reasoning)
+        settings = self.settings
+        model, reasoning = settings.model, settings.reasoning
         attempt = self.store.add_attempt(job_id, model, reasoning)
         live = {"started": started, "activity_at": None, "activity": "", "warning": ""}
         self.live[job_id] = live
@@ -132,8 +134,10 @@ class JobManager:
                 "Bot stopped. Execution interrupted; no automatic replay.",
             )
             raise
-        except Exception:
-            # Neither prompt contents nor raw exception diagnostics belong in Discord or logs.
+        except Exception as exc:
+            # Log the exception class only: neither prompt contents nor raw exception
+            # diagnostics belong in Discord or logs.
+            log.error("job=%s unexpected execution failure type=%s", job_id, type(exc).__name__)
             state = "failed"
         finally:
             elapsed = monotonic() - started
@@ -148,7 +152,7 @@ class JobManager:
             summary = (
                 f"Job {job_id} | session {job['session_id']} | {terminal}\n"
                 f"Model: {model or 'Codex default'} / {reasoning or 'default effort'}\n"
-                f"Attempt 1: {state} | {elapsed:.1f}s | "
+                f"Attempt {attempt['number']}: {state} | {elapsed:.1f}s | "
                 f"Tokens: {tokens if tokens is not None else 'unknown'}\n\n{message}"
             )
             if terminal != "succeeded":

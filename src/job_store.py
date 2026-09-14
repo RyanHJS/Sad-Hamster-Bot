@@ -238,10 +238,10 @@ class JobStore:
         return self._update("attempts", attempt_id, fields)
 
     def pending_deliveries(self, scope: str) -> list[dict]:
-        """Return recoverable deliveries; uncertain sends require inspection before retry."""
+        """Return deliveries still owed; redelivery is idempotent via recorded chunks."""
         return self._all(
             f"SELECT * FROM jobs WHERE scope = ? AND state NOT IN {_ACTIVE} "
-            "AND delivery IN ('pending', 'retry', 'uncertain') ORDER BY created, rowid",
+            "AND delivery IN ('pending', 'retry') ORDER BY created, rowid",
             (scope,),
         )
 
@@ -265,14 +265,10 @@ class JobStore:
         """Call only after acquiring the exclusive OS lock for the workspace(s).
 
         Marks abandoned work for result delivery; never starts a process or replays a prompt.
-        Terminal sends become uncertain, not automatically retryable. Returns the number
-        of active jobs interrupted, excluding delivery-only changes.
+        Returns the number of active jobs interrupted. Redelivery is idempotent because
+        ``chunks`` records every chunk already sent.
         """
         with self._connection:
-            self._connection.execute(
-                "UPDATE jobs SET delivery = 'uncertain' "
-                f"WHERE delivery = 'sending' AND state NOT IN {_ACTIVE}"
-            )
             self._connection.execute(
                 "UPDATE attempts SET state = 'interrupted', outcome = 'interrupted' "
                 f"WHERE state = 'running' AND job_id IN (SELECT id FROM jobs WHERE state IN {_ACTIVE})"

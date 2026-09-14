@@ -276,27 +276,28 @@ class JobStoreTest(unittest.TestCase):
         self.assertIsNone(self.store.get_job_by_message("one", 999))
         self.assertEqual(self.store.current_session("one"), selected)
 
-    def test_terminal_sending_becomes_uncertain_only_on_explicit_reconciliation(self):
+    def test_reconciliation_leaves_terminal_delivery_alone_and_keeps_chunks(self):
         job = self.job()
-        self.store.update_job(job["id"], state="completed", result="answer", delivery="sending")
+        self.store.update_job(job["id"], state="completed", result="answer", delivery="pending")
         self.store.record_chunk(job["id"], 0, 100)
         self.reopen()
         before = self.store.get_job("one", job["id"])
-        self.assertEqual(before["delivery"], "sending")
-        self.assertEqual(self.store.pending_deliveries("one"), [])
-        self.store.reconcile_interrupted()
-        recovered = self.store.get_job("one", job["id"])
-        self.assertEqual(recovered, {**before, "delivery": "uncertain"})
-        self.assertEqual(self.store.pending_deliveries("one"), [recovered])
-        self.assertEqual(self.store.pending_deliveries("two"), [])
-        self.assertEqual(self.store.delivered_chunks(job["id"]), {0: 100})
+        self.assertEqual(self.store.pending_deliveries("one"), [before])
+        # A terminal job is not an interrupted one, so reconciliation must not touch it.
         self.assertEqual(self.store.reconcile_interrupted(), 0)
-        self.assertEqual(self.store.get_job("one", job["id"]), recovered)
+        self.assertEqual(self.store.get_job("one", job["id"]), before)
+        # Already-sent chunks survive, so redelivery skips them instead of duplicating.
+        self.assertEqual(self.store.delivered_chunks(job["id"]), {0: 100})
+        self.assertEqual(self.store.pending_deliveries("two"), [])
 
-    def test_uncertain_active_delivery_is_not_pending(self):
+    def test_delivered_and_blocked_jobs_are_not_pending(self):
         job = self.job()
-        self.store.update_job(job["id"], delivery="uncertain")
+        self.store.update_job(job["id"], state="completed", result="answer", delivery="delivered")
         self.assertEqual(self.store.pending_deliveries("one"), [])
+        self.store.update_job(job["id"], delivery="blocked")
+        self.assertEqual(self.store.pending_deliveries("one"), [])
+        self.store.update_job(job["id"], delivery="retry")
+        self.assertEqual(len(self.store.pending_deliveries("one")), 1)
 
     def test_symlink_database_is_rejected_without_touching_target(self):
         self.store.close()

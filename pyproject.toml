@@ -17,7 +17,7 @@ dev = ["ruff>=0.12,<1", "build>=1.2,<2"]
 sad-hamster-bot = "sad_hamster_bot:main"
 
 [tool.setuptools]
-py-modules = ["sad_hamster_bot", "models", "bot_settings", "codex_runner", "job_manager", "job_store", "runtime_lock"]
+py-modules = ["sad_hamster_bot", "bot_settings", "codex_runner", "job_manager", "job_store", "runtime_lock"]
 package-dir = {"" = "src"}
 
 [tool.ruff]

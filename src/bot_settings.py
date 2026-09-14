@@ -9,13 +9,6 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-DEFAULT_MODELS = (
-    ("gpt-6-astra", "low"),
-    ("gpt-5.6-luna", "medium"),
-    ("gpt-5.6-sol", "low"),
-    ("gpt-5.6-terra", "low"),
-    ("gpt-5.5", "low"),
-)
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
@@ -28,8 +21,6 @@ class Settings:
     log_dir: Path
     codex_bin: str
     timeout: float = 0
-    models: tuple[tuple[str, str], ...] = DEFAULT_MODELS
-    retries: int = 0
     output_limit: int = 1024 * 1024
     chunk_size: int = 1900
     model: str = ""
@@ -37,7 +28,6 @@ class Settings:
     state_dir: Path | None = None
     startup_warn: float = 30
     idle_warn: float = 120
-    progress_interval: float = 15
     heartbeat_interval: float = 30
     lease_fds: tuple[int, ...] = field(default=(), repr=False)
 
@@ -102,28 +92,17 @@ class Settings:
         effort = (values.get("CODEX_REASONING_EFFORT") or "").strip()
         if effort and effort not in EFFORTS:
             raise ValueError("CODEX_REASONING_EFFORT is invalid")
-        raw_models = values.get("CODEX_MODELS")
-        if raw_models and (model or effort):
-            raise ValueError("Use CODEX_MODELS or legacy model/effort settings, not both")
-        models = DEFAULT_MODELS
-        if raw_models:
-            try:
-                models = tuple(
-                    tuple(part.strip() for part in item.split(":", 1))
-                    for item in raw_models.split(",")
-                )
-                if any(len(pair) != 2 or not pair[0] or pair[1] not in EFFORTS for pair in models):
-                    raise ValueError
-            except ValueError:
-                raise ValueError("CODEX_MODELS must contain model:reasoning entries") from None
-        elif model or effort:
-            models = ((model, effort),)
-        retries = integer("CODEX_RETRIES", 0, minimum=0)
-        if retries:
+        # Model fallback is gone: the bot never picks a model on the user's behalf.
+        # Reject only values that asked for the removed behaviour, so a leftover
+        # CODEX_RETRIES=0 stays a harmless no-op.
+        if (values.get("CODEX_MODELS") or "").strip():
             raise ValueError(
-                "CODEX_RETRIES must be 0: safe pre-execution rejection evidence "
-                "is not available; choose another model explicitly"
+                "CODEX_MODELS is no longer supported; the bot never selects a model on your "
+                "behalf. Use CODEX_MODEL/CODEX_REASONING_EFFORT, or leave both blank to use "
+                "your Codex configuration."
             )
+        if integer("CODEX_RETRIES", 0, minimum=0):
+            raise ValueError("CODEX_RETRIES is no longer supported and must be 0 or unset")
         return cls(
             token=required("DISCORD_BOT_TOKEN"),
             user_id=identifier("DISCORD_USER_ID"),
@@ -132,13 +111,12 @@ class Settings:
             log_dir=path(values.get("DISCORD_LOG_DIR") or "logs"),
             codex_bin=executable,
             timeout=timeout,
-            models=models,
-            retries=retries,
+            model=model,
+            reasoning=effort,
             output_limit=integer("CODEX_OUTPUT_LIMIT", 1024 * 1024),
             chunk_size=integer("DISCORD_CHUNK_SIZE", 1900, minimum=128, maximum=1900),
             state_dir=path(values.get("BOT_STATE_DIR") or "state"),
             startup_warn=number("CODEX_STARTUP_WARN_SECONDS", 30),
             idle_warn=number("CODEX_IDLE_WARN_SECONDS", 120),
-            progress_interval=number("DISCORD_PROGRESS_SECONDS", 15),
             heartbeat_interval=number("DISCORD_HEARTBEAT_SECONDS", 30),
         )

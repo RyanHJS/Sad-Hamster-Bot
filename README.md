@@ -28,8 +28,9 @@ cp .env.example .env
 
 Create an application in the [Discord Developer Portal](https://discord.com/developers/applications)
 and add a bot. Enable **Message Content Intent** in the bot settings. Use the
-OAuth2 URL Generator with the `bot` scope and **View Channels** and **Send
-Messages** permissions to invite it to your server.
+OAuth2 URL Generator with the `bot` and `applications.commands` scopes and
+**View Channels** and **Send Messages** permissions to invite it to your server.
+The `applications.commands` scope is what registers `/help`.
 
 In Discord, enable Developer Mode and copy your user ID and the channel ID.
 Put those IDs and the bot token in `.env`. Set `CODEX_WORKDIR` to the directory
@@ -60,10 +61,13 @@ summarize this project's README
 
 Only the configured user in the configured channel can invoke Codex, and only
 one request runs at a time. Busy requests are rejected, not queued. Each request
-continues the selected Codex session; use `session new` for unrelated context.
+continues the selected Codex session; use `/session new` for unrelated context.
+Commands start with `/`; anything else is passed to Codex verbatim, so a request
+that happens to begin with a word like "status" still reaches the agent.
 Stop with Ctrl-C; restart after changing code or
-configuration. The Discord display name and profile picture are set separately
-in the Developer Portal.
+configuration. Work in progress when the bot stops is reported as interrupted on
+the next launch and is never replayed. The Discord display name and profile
+picture are set separately in the Developer Portal.
 
 ## Configuration
 
@@ -81,26 +85,32 @@ chosen file; `~` expands to your home directory. Shell substitutions such as
 | `CODEX_WORKDIR` | Required | Existing target workspace |
 | `CODEX_BIN` | `codex` | Executable name or path, without arguments |
 | `CODEX_MAX_RUN_SECONDS` | `0` | Optional overall deadline; zero permits long-running tasks |
-| `CODEX_MODEL` | Codex default | Optional model override |
+| `CODEX_MODEL` | Codex default | Optional model override; blank passes no `--model` |
 | `CODEX_REASONING_EFFORT` | Codex default | Optional effort supported by your model |
 | `DISCORD_LOG_DIR` | `logs` | Directory for per-launch logs |
 | `BOT_STATE_DIR` | `state` | Private SQLite job/session state |
 
 Supported effort settings are `none`, `minimal`, `low`, `medium`, `high`,
 `xhigh`, and `max`; the selected model and installed Codex version must support
-the value. All other Codex settings remain in your Codex configuration.
+the value. Leave both blank to inherit whatever your Codex configuration
+selects: the bot never chooses a model on your behalf and ships no model list of
+its own. All other Codex settings remain in your Codex configuration.
 
 The bridge invokes Codex in JSON event mode and passes the request through
 stdin. Follow-ups use `codex exec resume <session-id> -`; the session ID is
-stored in the private SQLite database under `BOT_STATE_DIR`. `session new`
-starts an unrelated conversation, while `session list` and `session resume
+stored in the private SQLite database under `BOT_STATE_DIR`. `/session new`
+starts an unrelated conversation, while `/session list` and `/session resume
 <id>` select saved conversations. A custom `CODEX_BIN` wrapper must preserve
 JSONL stdout and separate stderr from stdout.
 
-Mention the bot with `status`, `cancel`, or `result <job-id>` while a task is
+Mention the bot with `/status`, `/cancel`, or `/result <job-id>` while a task is
 running. Requests receive an immediate acknowledgment and periodic status
 updates. A zero `CODEX_MAX_RUN_SECONDS` allows long-running work; startup and
 idle warnings describe what the bot has observed without killing a quiet agent.
+
+One bot at a time owns a workspace. The state directory holds an exclusive lock
+for the process lifetime, so a second launch against the same `CODEX_WORKDIR`
+exits with a clear error instead of running two agents over the same files.
 
 ## Discord Help
 
@@ -109,16 +119,20 @@ request sends the same guide:
 
 ```text
 @SadHamsterBot summarize the deployment configuration
-@SadHamsterBot status
-@SadHamsterBot cancel
-@SadHamsterBot result <job-id>
-@SadHamsterBot session new unrelated investigation
-@SadHamsterBot session list
-@SadHamsterBot session resume <session-id>
+@SadHamsterBot /status
+@SadHamsterBot /cancel
+@SadHamsterBot /result <job-id>
+@SadHamsterBot /session new unrelated investigation
+@SadHamsterBot /session list
+@SadHamsterBot /session resume <session-id>
 ```
 
-Slash commands require the application command scope when inviting the bot.
-Mention-based requests still require Message Content Intent.
+Every command is prefixed with `/`. A mention without a leading `/` is always
+treated as a request for Codex, so `status of the migration` reaches the agent
+rather than being parsed as a command.
+
+The `/help` slash command requires the `applications.commands` scope when
+inviting the bot. Mention-based requests still require Message Content Intent.
 
 ## Operation and Troubleshooting
 
@@ -159,8 +173,11 @@ sessions according to its own configuration.
 .venv/bin/python -m build
 ```
 
-There are two runtime dependencies: `discord.py` and `python-dotenv`. The single
-runtime module contains validated settings, subprocess execution, reply
-formatting, and the Discord client. Tests exercise real local subprocesses as
-well as mocked Discord delivery; they need no token or network access. CI runs
-tests, lint, and package builds on Linux and macOS.
+There are two runtime dependencies: `discord.py` and `python-dotenv`. The code is
+split by responsibility: `bot_settings` validates configuration, `codex_runner`
+runs one Codex process and parses its JSONL stream, `job_store` owns the SQLite
+state, `job_manager` owns job execution independently of Discord, `runtime_lock`
+enforces one owner per workspace, and `sad_hamster_bot` is the Discord client.
+Tests exercise real local subprocesses as well as mocked Discord delivery; they
+need no token or network access. CI runs tests, lint, and package builds on Linux
+and macOS.
