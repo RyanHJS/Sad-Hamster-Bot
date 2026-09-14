@@ -13,4 +13,5 @@ build/
 dist/
 .ruff_cache/
 logs/
+state/
 .DS_Store

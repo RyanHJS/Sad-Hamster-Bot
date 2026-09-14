@@ -1,273 +1,304 @@
-"""A private Discord bridge to the Codex CLI."""
+"""A private Discord bridge for durable Codex jobs."""
 
 import argparse
 import asyncio
 import logging
-import math
 import os
 import re
-import shutil
-import signal
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from time import monotonic
 
 import discord
-from dotenv import dotenv_values
-from models import CodexResult
+from discord import app_commands
+
+from bot_settings import Settings
+from codex_runner import run_codex
+from job_manager import JobManager
+from job_store import JobStore
+from runtime_lock import RuntimeLease
 
 log = logging.getLogger("sad_hamster_bot")
 
+COMMANDS = frozenset({"help", "status", "cancel", "result", "session"})
 
-@dataclass(frozen=True)
-class Settings:
-    token: str = field(repr=False)
-    user_id: int
-    channel_id: int
-    workdir: Path
-    log_dir: Path
-    codex_bin: str
-    timeout: float = 30
-    models: tuple[tuple[str, str], ...] = (("gpt-6-astra", "low"), ("gpt-5.6-luna", "medium"), ("gpt-5.6-sol", "low"), ("gpt-5.6-terra", "low"), ("gpt-5.5", "low"))
-    retries: int = 3
-    output_limit: int = 1024 * 1024
-    chunk_size: int = 1900
-    model: str = ""
-    reasoning: str = ""
 
-    @classmethod
-    def load(cls, env_file: Path) -> "Settings":
-        env_file = env_file.expanduser().resolve()
-        values = {**dotenv_values(env_file, interpolate=False), **os.environ}
+def parse_command(prompt):
+    """Return argv for a slash-prefixed control command, or None for a Codex request.
 
-        def required(key):
-            value = (values.get(key) or "").strip()
-            if not value:
-                raise ValueError(f"{key} is required")
-            return value
+    Requiring the slash keeps ordinary requests that merely begin with a command
+    word ("status of the migration") out of the control path.
+    """
+    if not prompt.startswith("/"):
+        return None
+    parts = prompt[1:].split()
+    if not parts or parts[0].lower() not in COMMANDS:
+        return None
+    verb = parts[0].lower()
+    # Lowercase the verb, and the subcommand for "/session NEW". Every other
+    # token is an ID or request text, so it stays verbatim.
+    if verb == "session" and len(parts) > 1:
+        return [verb, parts[1].lower(), *parts[2:]]
+    return [verb, *parts[1:]]
 
-        def identifier(key):
-            value = required(key)
-            if not value.isascii() or not value.isdecimal() or int(value) <= 0:
-                raise ValueError(f"{key} must be a positive Discord ID")
-            return int(value)
 
-        def path(value):
-            return (env_file.parent / Path(value).expanduser()).resolve()
+def command_tail(prompt, words):
+    """Return the text after the first ``words`` tokens, whitespace intact.
 
-        try:
-            timeout = float(values.get("CODEX_TIMEOUT_SECONDS", "30"))
-        except (TypeError, ValueError):
-            raise ValueError("CODEX_TIMEOUT_SECONDS must be a number") from None
-        if not math.isfinite(timeout) or timeout <= 0:
-            raise ValueError("CODEX_TIMEOUT_SECONDS must be finite and greater than zero")
-        workdir = path(required("CODEX_WORKDIR"))
-        if not workdir.is_dir():
-            raise ValueError("CODEX_WORKDIR must be an existing directory")
-        executable = values.get("CODEX_BIN", "codex") or "codex"
-        if "/" in executable:
-            executable = str(path(executable))
-        executable = shutil.which(executable)
-        if not executable:
-            raise ValueError("CODEX_BIN must name an installed executable")
-        raw_models = values.get("CODEX_MODELS") or "gpt-6-astra:low,gpt-5.6-luna:medium,gpt-5.6-sol:low,gpt-5.6-terra:low,gpt-5.5:low"
-        efforts = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-        try:
-            models = tuple((name.strip(), effort.strip()) for name, effort in (item.split(":", 1) for item in raw_models.split(",")))
-        except ValueError:
-            raise ValueError("CODEX_MODELS must be comma-separated model:reasoning entries") from None
-        if not models or any(not name or effort not in efforts for name, effort in models):
-            raise ValueError("CODEX_MODELS contains an invalid model or reasoning effort")
-        try:
-            retries = int(values.get("CODEX_RETRIES", "3"))
-        except ValueError:
-            raise ValueError("CODEX_RETRIES must be a non-negative integer") from None
-        if retries < 0:
-            raise ValueError("CODEX_RETRIES must be a non-negative integer")
-        return cls(
-            required("DISCORD_BOT_TOKEN"),
-            identifier("DISCORD_USER_ID"),
-            identifier("DISCORD_CHANNEL_ID"),
-            workdir,
-            path(values.get("DISCORD_LOG_DIR") or "logs"),
-            executable,
-            timeout,
-            models, retries,
-            int(values.get("CODEX_OUTPUT_LIMIT", 1024 * 1024)),
-            int(values.get("DISCORD_CHUNK_SIZE", 1900)),
-        )
+    Rebuilding a request by joining argv would collapse newlines and runs of
+    spaces, so a multi-line prompt must be recovered from the original text.
+    """
+    parts = prompt.split(maxsplit=words)
+    return parts[words] if len(parts) > words else ""
+
+
+def state_directory(settings: Settings) -> Path:
+    """Resolve the state directory once: the lease and the store must agree."""
+    return settings.state_dir or settings.workdir / "state"
 
 
 def configure_logging(directory: Path) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
-    prefix = f"sad-hamster-bot-{datetime.now():%Y-%m-%dT%H%M%S}-"
-    descriptor, filename = tempfile.mkstemp(prefix=prefix, suffix=".log", dir=directory)
-    os.close(descriptor)
+    fd, name = tempfile.mkstemp(
+        prefix=f"sad-hamster-bot-{datetime.now():%Y-%m-%dT%H%M%S}-", suffix=".log", dir=directory
+    )
+    os.close(fd)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(), logging.FileHandler(filename, encoding="utf-8")],
+        handlers=[logging.StreamHandler(), logging.FileHandler(name)],
         force=True,
     )
-    return Path(filename)
+    return Path(name)
 
 
-class OutputLimitExceeded(Exception):
-    pass
-
-
-async def read_output(stream: asyncio.StreamReader, limit: int = 1024 * 1024) -> str:
-    output = bytearray()
-    while chunk := await stream.read(65536):
-        output.extend(chunk)
-        if len(output) > limit:
-            raise OutputLimitExceeded
-    return output.decode("utf-8", errors="replace").strip()
-
-
-async def run_codex(prompt: str, settings: Settings) -> CodexResult:
-    started = monotonic()
-    command = [settings.codex_bin, "exec", "--skip-git-repo-check", "--color", "never"]
-    if settings.model:
-        command.extend(["--model", settings.model])
-    if settings.reasoning:
-        command.extend(["-c", f'model_reasoning_effort="{settings.reasoning}"'])
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            "-",
-            cwd=settings.workdir,
-            start_new_session=True,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={key: value for key, value in os.environ.items() if not key.startswith("DISCORD_")},
-        )
-    except OSError:
-        log.error("Could not start Codex; check CODEX_BIN and CODEX_WORKDIR")
-        return CodexResult(
-            "Codex could not start. Check its executable and workspace.", monotonic() - started
-        )
-    tasks = [
-        asyncio.create_task(read_output(stream, settings.output_limit)) for stream in (process.stdout, process.stderr)
-    ]
-    tasks.append(asyncio.create_task(process.wait()))
-    try:
-        process.stdin.write(prompt.encode("utf-8"))
-        process.stdin.close()
-        output, diagnostics, _ = await asyncio.wait_for(asyncio.gather(*tasks), settings.timeout)
-    except TimeoutError:
-        return CodexResult("Codex timed out.", monotonic() - started)
-    except OutputLimitExceeded:
-        return CodexResult(
-            "Codex stopped because its output exceeded 1 MiB.", monotonic() - started
-        )
-    finally:
-        # Kill the session's process group so timeouts and shutdown also stop child tools.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await process.communicate()
-    if process.returncode:
-        log.warning("Codex exited with status %d", process.returncode)
-        output = (
-            f"Codex exited with status {process.returncode}. Check Codex login and configuration."
-        )
-    # The header precedes the echoed prompt; only the final footer contains token usage.
-    header = diagnostics.split("\nuser\n", 1)[0]
-    model = re.search(r"^model: (.+)$", header, re.MULTILINE)
-    reasoning = re.search(r"^reasoning effort: (.+)$", header, re.MULTILINE)
-    tokens = re.search(r"(?:^|\n)tokens used\s*\n([0-9][0-9,]*)\s*$", diagnostics)
-    log.info("Codex finished status=%d", process.returncode)
-    return CodexResult(
-        output or "Codex completed without output.",
-        monotonic() - started,
-        model.group(1).strip() if model else "unavailable",
-        reasoning.group(1).strip() if reasoning else "unavailable",
-        f"{int(tokens.group(1).replace(',', '')):,}" if tokens else "unavailable",
-    )
-
-
-async def run_with_fallback(prompt: str, settings: Settings) -> CodexResult:
-    last = None
-    retries = 0
-    for model, reasoning in settings.models:
-        for attempt in range(settings.retries + 1):
-            result = await run_codex(prompt, settings.__class__(**{**settings.__dict__, "models": settings.models, "model": model, "reasoning": reasoning}))
-            result = CodexResult(result.message, result.elapsed, result.model, result.reasoning, result.tokens, retries)
-            last = result
-            if result.message != "Codex timed out.":
-                return result
-            retries += 1
-    return last
-
-
-def discord_format(text: str) -> str:
-    lines = text.splitlines()
-    if any("|" in line and re.match(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$", line) for line in lines):
-        return "```\n" + text.replace("```", "``\\u200b`") + "\n```"
-    return text
+def split_message(text, limit=1900):
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        cut = text.rfind("\n", 0, limit + 1)
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return chunks or [""]
 
 
 class CodexBot(discord.Client):
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, store=None, runner=run_codex, lease=None):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
         self.settings = settings
-        self.lock = asyncio.Lock()
+        self.lease = lease
+        self.store = store or JobStore(state_directory(settings))
+        interrupted = self.store.reconcile_interrupted()
+        if interrupted:
+            log.warning("Recovered %d job(s) abandoned by a previous run", interrupted)
+        self.manager = JobManager(settings, self.store, runner=runner)
+        self.jobs = {}
+        self.status_messages = {}
+        self._heartbeat = None
+        self._synced = False
+        self.tree = app_commands.CommandTree(self)
+
+        @self.tree.command(name="help", description="Show Sad Hamster Bot commands")
+        async def help_command(interaction: discord.Interaction):
+            await interaction.response.send_message(self.help_text(), ephemeral=True)
+
+    def _ok(self, m):
+        return (
+            not m.author.bot
+            and m.author.id == self.settings.user_id
+            and m.channel.id == self.settings.channel_id
+            and self.user
+            and any(x.id == self.user.id for x in m.mentions)
+        )
+
+    async def _send(self, c, text, author=None):
+        return await c.send(
+            text,
+            allowed_mentions=discord.AllowedMentions(
+                users=[author] if author else False, roles=False, everyone=False, replied_user=False
+            ),
+        )
 
     async def on_ready(self):
-        log.info("Ready as %s in channel %d", self.user, self.settings.channel_id)
+        log.info("Ready as %s", self.user)
+        # Start delivery before syncing: a rate-limited command sync must never keep
+        # finished jobs from reaching Discord.
+        if self._heartbeat is None or self._heartbeat.done():
+            self._heartbeat = asyncio.create_task(self._status_loop())
+        if not self._synced:
+            try:
+                await self.tree.sync()
+                self._synced = True
+            except discord.HTTPException as exc:
+                log.warning("Slash command sync failed (status=%s); /help may be stale", exc.status)
 
-    async def on_message(self, message: discord.Message):
-        if (
-            message.author.bot
-            or message.author.id != self.settings.user_id
-            or message.channel.id != self.settings.channel_id
-            or self.user is None
-        ):
+    @staticmethod
+    def help_text():
+        return ("**Sad Hamster Bot**\nMention me with a request to run Codex remotely. "
+                "Commands start with `/`; anything else is sent to Codex as-is.\n\n"
+                "`/session new [request]` starts a fresh conversation, `/session list` lists "
+                "sessions, and `/session resume <id>` continues an old one.\n\n"
+                "`/status [job-id]` shows activity, `/cancel [job-id]` stops a job, and "
+                "`/result <job-id>` retrieves a result. Normal requests continue the selected "
+                "session. Fresh sessions do not undo workspace changes.")
+
+    async def _status_loop(self):
+        while not self.is_closed():
+            await asyncio.sleep(self.settings.heartbeat_interval)
+            # One bad tick must never end the loop: it owns result delivery for the
+            # whole process, so dying here would silently strand finished jobs.
+            try:
+                await self.deliver_once()
+                for job_id, task in list(self.jobs.items()):
+                    message = self.status_messages.get(job_id)
+                    if message and not task.done():
+                        try:
+                            await message.edit(content=self.manager.status(job_id))
+                        except discord.HTTPException:
+                            pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Heartbeat tick failed; continuing")
+
+    async def _deliver(self, job):
+        if not job.get("result"):
             return
-        prompt = re.sub(rf"<@!?{self.user.id}>", "", message.content).strip()
+        channel = self.get_channel(self.settings.channel_id)
+        if channel is None:
+            return
         try:
-            if not prompt:
-                await message.channel.send("Please include a request after mentioning me.")
-                return
-            if self.lock.locked():
-                await message.channel.send("Codex is already working on another request.")
-                return
-            async with self.lock:
-                log.info("Starting request message_id=%d", message.id)
-                try:
-                    async with message.channel.typing():
-                        result = await run_with_fallback(prompt, self.settings)
-                except Exception as exc:
-                    log.error(
-                        "Request failed message_id=%d type=%s", message.id, type(exc).__name__
-                    )
-                    result = CodexResult("The request failed unexpectedly. Check the bot logs.", 0)
-                text = discord_format(result.format())
-                for start in range(0, len(text), self.settings.chunk_size):
-                    await message.channel.send(
-                        text[start : start + self.settings.chunk_size],
-                        allowed_mentions=discord.AllowedMentions(
-                            users=[message.author] if start == 0 else False,
-                            roles=False,
-                            everyone=False,
-                            replied_user=False,
-                        ),
-                    )
+            sent = self.store.delivered_chunks(job["id"])
+            for i, chunk in enumerate(split_message(job["result"], self.settings.chunk_size)):
+                if i in sent:
+                    continue
+                msg = await self._send(
+                    channel, (f"<@{self.settings.user_id}>\n" if i == 0 else "") + chunk
+                )
+                self.store.record_chunk(job["id"], i, msg.id)
+            self.store.update_job(job["id"], delivery="delivered")
         except discord.HTTPException as exc:
-            log.warning("Discord delivery failed message_id=%d status=%d", message.id, exc.status)
+            self.store.update_job(
+                job["id"], delivery="blocked" if exc.status in (403, 404) else "retry"
+            )
+
+    async def deliver_once(self):
+        for job in self.store.pending_deliveries(self.manager.scope):
+            await self._deliver(job)
+        finished = [i for i, t in self.jobs.items() if t.done()]
+        for job_id in finished:
+            del self.jobs[job_id]
+            # Drop the cached Message too, or every completed job leaks one.
+            self.status_messages.pop(job_id, None)
+
+    async def _run(self, job, prompt):
+        await self.manager.execute(job, prompt)
+
+    async def _start(self, m, prompt, fresh=False):
+        """Admit a job, acknowledge it, and register it for heartbeat status edits."""
+        existing = self.store.current_session(self.manager.scope)
+        job = self.manager.admit(m.id, fresh=fresh)
+        if fresh:
+            selected = "new session created"
+        else:
+            selected = "session resumed" if existing else "session created"
+        status = await self._send(
+            m.channel, f"Accepted job {job['id']}; {selected}.", m.author
+        )
+        self.store.update_job(job["id"], status_message_id=status.id)
+        self.status_messages[job["id"]] = status
+        self.jobs[job["id"]] = asyncio.create_task(self._run(job, prompt))
+
+    async def _control(self, m, p, prompt=""):
+        action = p[0]
+        try:
+            if action == "help":
+                out = self.help_text()
+            elif action == "status":
+                out = self.manager.status(p[1] if len(p) > 1 else None)
+            elif action == "cancel":
+                out = self.manager.cancel(p[1] if len(p) > 1 else None)
+            elif action == "result":
+                out = (
+                    self.manager.job(p[1] if len(p) > 1 else None).get("result")
+                    or "That job has no result yet."
+                )
+            elif action == "session" and len(p) > 1:
+                if p[1] == "new":
+                    if len(p) > 2:
+                        # Route through _start so the job gets acknowledged and tracked.
+                        # Take the tail from the raw text to preserve line breaks.
+                        await self._start(m, command_tail(prompt, 2), fresh=True)
+                        return
+                    out = f"Created and selected new session {self.manager.new_session()['id']}."
+                elif p[1] == "list":
+                    out = (
+                        "\n".join(
+                            f"{s['id']}: {s['label'] or 'unnamed'}"
+                            for s in self.store.sessions(self.manager.scope)
+                        )
+                        or "No sessions."
+                    )
+                elif p[1] == "resume" and len(p) == 3:
+                    out = f"Selected session {self.manager.select_session(p[2])['id']}."
+                else:
+                    out = "Usage: /session new [request], /session list, /session resume <id>"
+            else:
+                out = "Usage: /status [job-id], /cancel [job-id], /result <job-id>, /session ..."
+            await self._send(m.channel, out)
+        except ValueError as exc:
+            await self._send(m.channel, str(exc))
+
+    async def on_message(self, m):
+        if not self._ok(m):
+            return
+        prompt = re.sub(rf"<@!?{self.user.id}>", "", m.content).strip()
+        if not prompt:
+            await self._send(m.channel, self.help_text())
+            return
+        try:
+            command = parse_command(prompt)
+            if command is not None:
+                # Pass the raw text too: "/session new <request>" must keep the
+                # request's original line breaks and spacing.
+                await self._control(m, command, prompt[1:])
+                return
+            await self._start(m, prompt)
+        except ValueError as exc:
+            await self._send(m.channel, str(exc))
+        except discord.HTTPException:
+            # The ack never reached Discord. Release the admitted job so the
+            # workspace does not stay wedged behind a job with no process.
+            job = self.store.get_job_by_message(self.manager.scope, m.id)
+            if job:
+                self.store.update_job(
+                    job["id"],
+                    state="failed",
+                    result="Request was not started because acknowledgment failed.",
+                    delivery="blocked",
+                )
+
+    async def close(self):
+        if self._heartbeat:
+            self._heartbeat.cancel()
+            await asyncio.gather(self._heartbeat, return_exceptions=True)
+        for task in self.jobs.values():
+            task.cancel()
+        await asyncio.gather(*self.jobs.values(), return_exceptions=True)
+        self.store.close()
+        if self.lease is not None:
+            self.lease.close()
+        await super().close()
 
 
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--check", action="store_true", help="Validate settings without connecting")
@@ -283,7 +314,18 @@ def main() -> None:
         return
     log_path = configure_logging(settings.log_dir)
     log.info("Starting Sad Hamster Bot log_file=%s", log_path)
-    CodexBot(settings).run(settings.token, log_handler=None)
+    state_dir = state_directory(settings)
+    try:
+        # Held for the process lifetime and inherited by Codex, so a second bot
+        # cannot drive the same workspace concurrently.
+        lease = RuntimeLease(state_dir / "runtime.lock")
+    except (ValueError, OSError) as exc:
+        parser.error(str(exc))
+    settings = replace(settings, lease_fds=(lease.fd,))
+    try:
+        CodexBot(settings, lease=lease).run(settings.token, log_handler=None)
+    finally:
+        lease.close()
 
 
 if __name__ == "__main__":
