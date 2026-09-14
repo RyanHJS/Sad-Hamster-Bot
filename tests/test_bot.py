@@ -14,6 +14,17 @@ class BotContractTest(unittest.TestCase):
         self.assertIsNone(bot.parse_command("status of the migration - safe to deploy?"))
         self.assertIsNone(bot.parse_command("/deploy the thing"))
 
+    def test_command_verb_case_is_normalized_but_ids_are_not(self):
+        self.assertEqual(bot.parse_command("/SESSION NEW Fix It"),
+                         ["session", "new", "Fix", "It"])
+        self.assertEqual(bot.parse_command("/STATUS abc123DEF"), ["status", "abc123DEF"])
+
+    def test_session_new_request_keeps_original_line_breaks(self):
+        prompt = "session new refactor the parser\n\n- keep tests green\n- update README"
+        self.assertEqual(bot.command_tail(prompt, 2),
+                         "refactor the parser\n\n- keep tests green\n- update README")
+        self.assertEqual(bot.command_tail("session new", 2), "")
+
     def test_message_splitting_respects_discord_limit(self):
         chunks = bot.split_message("x" * 4001, 1900)
         self.assertEqual("".join(chunks), "x" * 4001)

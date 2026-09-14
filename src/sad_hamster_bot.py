@@ -35,7 +35,27 @@ def parse_command(prompt):
     parts = prompt[1:].split()
     if not parts or parts[0].lower() not in COMMANDS:
         return None
-    return [parts[0].lower(), *parts[1:]]
+    verb = parts[0].lower()
+    # Lowercase the verb, and the subcommand for "/session NEW". Every other
+    # token is an ID or request text, so it stays verbatim.
+    if verb == "session" and len(parts) > 1:
+        return [verb, parts[1].lower(), *parts[2:]]
+    return [verb, *parts[1:]]
+
+
+def command_tail(prompt, words):
+    """Return the text after the first ``words`` tokens, whitespace intact.
+
+    Rebuilding a request by joining argv would collapse newlines and runs of
+    spaces, so a multi-line prompt must be recovered from the original text.
+    """
+    parts = prompt.split(maxsplit=words)
+    return parts[words] if len(parts) > words else ""
+
+
+def state_directory(settings: Settings) -> Path:
+    """Resolve the state directory once: the lease and the store must agree."""
+    return settings.state_dir or settings.workdir / "state"
 
 
 def configure_logging(directory: Path) -> Path:
@@ -74,7 +94,7 @@ class CodexBot(discord.Client):
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
         self.settings = settings
         self.lease = lease
-        self.store = store or JobStore(settings.state_dir or settings.workdir / "state")
+        self.store = store or JobStore(state_directory(settings))
         interrupted = self.store.reconcile_interrupted()
         if interrupted:
             log.warning("Recovered %d job(s) abandoned by a previous run", interrupted)
@@ -196,7 +216,7 @@ class CodexBot(discord.Client):
         self.status_messages[job["id"]] = status
         self.jobs[job["id"]] = asyncio.create_task(self._run(job, prompt))
 
-    async def _control(self, m, p):
+    async def _control(self, m, p, prompt=""):
         action = p[0]
         try:
             if action == "help":
@@ -214,7 +234,8 @@ class CodexBot(discord.Client):
                 if p[1] == "new":
                     if len(p) > 2:
                         # Route through _start so the job gets acknowledged and tracked.
-                        await self._start(m, " ".join(p[2:]), fresh=True)
+                        # Take the tail from the raw text to preserve line breaks.
+                        await self._start(m, command_tail(prompt, 2), fresh=True)
                         return
                     out = f"Created and selected new session {self.manager.new_session()['id']}."
                 elif p[1] == "list":
@@ -245,7 +266,9 @@ class CodexBot(discord.Client):
         try:
             command = parse_command(prompt)
             if command is not None:
-                await self._control(m, command)
+                # Pass the raw text too: "/session new <request>" must keep the
+                # request's original line breaks and spacing.
+                await self._control(m, command, prompt[1:])
                 return
             await self._start(m, prompt)
         except ValueError as exc:
@@ -291,7 +314,7 @@ def main():
         return
     log_path = configure_logging(settings.log_dir)
     log.info("Starting Sad Hamster Bot log_file=%s", log_path)
-    state_dir = settings.state_dir or settings.workdir / "state"
+    state_dir = state_directory(settings)
     try:
         # Held for the process lifetime and inherited by Codex, so a second bot
         # cannot drive the same workspace concurrently.
