@@ -1,2 +1,0 @@
-[console_scripts]
-sad-hamster-bot = sad_hamster_bot:main

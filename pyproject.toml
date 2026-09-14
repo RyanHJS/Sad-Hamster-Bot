@@ -14,10 +14,10 @@ dependencies = ["discord.py>=2.5,<3", "python-dotenv>=1.2,<2"]
 dev = ["ruff>=0.12,<1", "build>=1.2,<2"]
 
 [project.scripts]
-sad-hamster-bot = "sad_hamster_bot:main"
+sad-hamster-bot = "bot:main"
 
 [tool.setuptools]
-py-modules = ["sad_hamster_bot", "models"]
+py-modules = ["bot", "settings", "sessions", "process", "events", "runner_codex", "runner_claude"]
 package-dir = {"" = "src"}
 
 [tool.ruff]

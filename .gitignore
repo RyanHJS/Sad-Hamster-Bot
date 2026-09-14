@@ -1,5 +1,5 @@
 # Environment-specific secret files
-.env                 
+.env
 .env.*
 !.env.example
 
@@ -13,4 +13,5 @@ build/
 dist/
 .ruff_cache/
 logs/
+state/
 .DS_Store

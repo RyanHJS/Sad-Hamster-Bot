@@ -1,20 +1,23 @@
 # Sad Hamster Bot
 
-A small, private Discord bot that sends your requests to the local Codex CLI.
-It works with any local workspace.
+A small, private Discord bot that runs your local coding agent — Codex CLI or
+Claude Code — against your own repos, from Discord.
 
-Send a request in the configured channel. It replies with a compact summary of
-model, reasoning effort, token usage, and elapsed execution time, then the final
-answer. Startup banners, echoed prompts, and tool output stay out of Discord.
+One channel is one repo is one session. A channel named `#my-repo` runs in
+`BASE_FOLDER/my-repo`, and its conversation resumes automatically, so follow-ups
+keep their context. Tool activity streams back as messages that update in place.
+
+> **This bot runs an agent with your permissions, unattended.** Whoever holds the
+> configured Discord account can change files and run commands in those folders,
+> limited only by your local agent configuration. There is no per-command
+> approval step. Run it as a private bot, on a machine you trust, in channels
+> only you can post to.
 
 ## Setup
 
-Requires macOS or Linux, Python 3.12+, and an installed, authenticated
-[Codex CLI](https://developers.openai.com/codex/cli/).
-Run `codex login` and confirm `codex exec --help` works before starting the bot.
-The bot uses Codex's existing authentication and sandbox configuration.
-
-From this directory:
+Requires macOS or Linux, Python 3.12+, and at least one installed, authenticated
+agent CLI: [Codex](https://developers.openai.com/codex/cli/) (`codex login`) or
+[Claude Code](https://code.claude.com/docs) (`claude`).
 
 ```sh
 python3 -m venv .venv
@@ -22,113 +25,124 @@ python3 -m venv .venv
 cp .env.example .env
 ```
 
-Create an application in the [Discord Developer Portal](https://discord.com/developers/applications)
-and add a bot. Enable **Message Content Intent** in the bot settings. Use the
-OAuth2 URL Generator with the `bot` scope and **View Channels** and **Send
-Messages** permissions to invite it to your server.
+Create an application in the
+[Discord Developer Portal](https://discord.com/developers/applications), add a
+bot, and enable **Message Content Intent**. Invite it with the `bot` scope and
+**View Channels** and **Send Messages**.
 
-In Discord, enable Developer Mode and copy your user ID and the channel ID.
-Put those IDs and the bot token in `.env`. Set `CODEX_WORKDIR` to the directory
-you want Codex to work in. Keep `.env` private; Git ignores it.
+Enable Developer Mode in Discord to copy your user ID. Put it and the token in
+`.env`, and point `BASE_FOLDER` at the parent directory of your repos. Keep
+`.env` private; Git ignores it.
 
-## Start the bot
-
-After creating `.env` and installing the package, start the bot from this
-directory with:
+## Run it
 
 ```sh
 .venv/bin/sad-hamster-bot --check
 .venv/bin/sad-hamster-bot
 ```
 
-The first command validates configuration. The second command connects to
-Discord and keeps the bot running; leave that terminal open. Stop it with
-Ctrl-C. To use a different environment file, run
-`.venv/bin/sad-hamster-bot --env-file /path/to/.env`.
+`--check` validates configuration and finds the executables without connecting to
+Discord. Every failure names the setting that caused it.
 
-`--check` validates local configuration and finds the executable without
-connecting to Discord or using Codex tokens. It does not verify authentication.
-In Discord, send a request in the configured channel:
+Then create a channel named after a folder under `BASE_FOLDER` and send a message:
 
 ```text
 summarize this project's README
 ```
 
-Only the configured user in the configured channel can invoke Codex, and only
-one request runs at a time. Busy requests are rejected, not queued. Each request
-starts a fresh Codex session. Stop with Ctrl-C; restart after changing code or
-configuration. The Discord display name and profile picture are set separately
-in the Developer Portal.
+## Commands
+
+Commands start with `/`. Anything else goes to the agent verbatim, so a request
+that happens to begin with "status" still reaches the agent.
+
+| Command | Effect |
+| --- | --- |
+| `/status` | Whether a run is active, and which agent this channel uses |
+| `/stop` | Cancel the running job, including its child tools |
+| `/clear` | Forget this channel's session; the next message starts fresh |
+| `/agent [codex\|claude]` | Show or switch this channel's agent (switching resets its session) |
+| `/help` | The same summary, in Discord |
+
+One run at a time per channel; further messages are refused, not queued.
+Different channels are independent and can run at once.
 
 ## Configuration
 
-Settings load from `.env` in the launch directory. Use
-`sad-hamster-bot --env-file /path/to/.env` when launching elsewhere. Existing
-environment variables take precedence. Relative paths resolve against the
-chosen file; `~` expands to your home directory. Shell substitutions such as
-`$PWD` are not expanded in the file.
+Settings load from `.env` in the launch directory, or `--env-file /path/to/.env`.
+Environment variables win over the file. Relative paths resolve against the file;
+`~` expands.
 
-| Setting | Required / Default | Purpose |
+| Setting | Default | Purpose |
 | --- | --- | --- |
-| `DISCORD_BOT_TOKEN` | Required | Discord bot token |
+| `DISCORD_BOT_TOKEN` | Required | Bot token |
 | `DISCORD_USER_ID` | Required | The one authorized user |
-| `DISCORD_CHANNEL_ID` | Required | The one authorized channel |
-| `CODEX_WORKDIR` | Required | Existing target workspace |
-| `CODEX_BIN` | `codex` | Executable name or path, without arguments |
-| `CODEX_TIMEOUT_SECONDS` | `30` | Positive, finite execution timeout |
-| `CODEX_MODEL` | Codex default | Optional model override |
-| `CODEX_REASONING_EFFORT` | Codex default | Optional effort supported by your model |
-| `DISCORD_LOG_DIR` | `logs` | Directory for per-launch logs |
+| `BASE_FOLDER` | Required | Parent folder of your repos |
+| `DISCORD_CHANNEL_IDS` | any | Optional channel allowlist |
+| `AGENT` | `codex` | Default agent: `codex` or `claude` |
+| `CODEX_BIN` / `CLAUDE_BIN` | `codex` / `claude` | Executable name or path |
+| `MODEL` | agent default | Optional model override |
+| `REASONING_EFFORT` | agent default | Codex only: `none`…`max` |
+| `MAX_RUN_SECONDS` | `0` | Overall deadline; zero means none |
+| `OUTPUT_LIMIT` | 1 MiB | Cap on a single JSONL record |
+| `DISCORD_CHUNK_SIZE` | `1900` | Reply chunk size |
+| `DISCORD_LOG_DIR` | `logs` | Per-launch logs |
+| `BOT_STATE_DIR` | `state` | SQLite session map and lock |
 
-Supported effort settings are `none`, `minimal`, `low`, `medium`, `high`,
-`xhigh`, and `max`; the selected model and installed Codex version must support
-the value. All other Codex settings remain in your Codex configuration.
+Leaving `MODEL` and `REASONING_EFFORT` blank passes no model flags at all, so the
+agent uses its own configuration.
 
-The bridge invokes `codex exec --skip-git-repo-check --color never -` and
-passes the request through stdin. A custom `CODEX_BIN` wrapper must preserve
-the standard text output mode and separate stdout from stderr. JSON output
-is not supported. The old `CODEX_COMMAND` setting has been replaced by
-`CODEX_BIN`, `CODEX_MODEL`, and `CODEX_REASONING_EFFORT`.
+Channel names are resolved strictly: a name containing `/`, `\`, or a leading `.`
+is refused, and the resolved path must stay inside `BASE_FOLDER`.
 
-## Operation and Troubleshooting
+One bot owns a state directory at a time, enforced by a lock file, so a second
+launch exits with a clear error instead of running two agents over one folder.
 
-The authorized Discord user can request whatever your local Codex configuration
-allows, including workspace changes. Run this as a private bot on a trusted
-machine. The bot does not change Codex's approval or sandbox settings, and does
-not pass `DISCORD_*` environment variables to the Codex process.
+## How it works
 
-Each launch creates a separate timestamped log with request IDs and status,
-without recording prompts, responses, or raw Codex diagnostics. Logs are not
-automatically rotated; remove old files as needed. Codex itself may retain
-sessions according to its own configuration.
+`codex exec [resume <id>] --json --skip-git-repo-check -` with the prompt on
+stdin, or `claude -p <prompt> --output-format stream-json --verbose [--resume
+<id>]`. Both stream JSONL, which becomes the tool and result messages you see.
+Unrecognized event types are ignored rather than treated as errors, so an agent
+CLI update does not break a run.
 
-- No reply: check the configured IDs, Message Content Intent, channel
-  permissions, and that you selected an actual bot mention.
-- Startup configuration error: fix the named setting and rerun `--check`.
-- Codex failure: check `codex login` and run Codex directly in the configured
-  workspace to inspect its error. The bot does not automatically retry tasks
-  because they may already have changed files.
-- Timeout: increase `CODEX_TIMEOUT_SECONDS` for longer tasks. Timeouts and
-  shutdown kill Codex's process group, including ordinary child tools. Tools
-  that deliberately detach into another process group are outside that cleanup.
-- Output limit: each output stream is capped at 1 MiB; exceeding it stops the
-  run. Ask for a smaller result. Long answers are sent in 1,900-character chunks.
-- Metadata says `unavailable`: the installed CLI did not emit a recognized
-  field. Metadata parsing is best effort; the final answer remains separate.
-- Discord delivery failure: the log records the message ID and HTTP status;
-  the next request can still run. There is no persistent queue or reply retry.
+Each launch writes a timestamped log of status and errors. Prompts and responses
+are never written to disk, and failures log the exception class only. `DISCORD_*`
+variables are withheld from the agent's environment.
+
+Cancellation, deadlines, and shutdown terminate the agent's whole process group
+(SIGTERM, then SIGKILL), so ordinary child tools die with it. A tool that
+deliberately detaches into its own process group is outside that cleanup.
+
+## Troubleshooting
+
+- **No reply**: check `DISCORD_USER_ID`, Message Content Intent, and that the
+  channel name matches a folder under `BASE_FOLDER`.
+- **"No folder for #name"**: create it, or rename the channel. Discord turns
+  spaces into hyphens.
+- **Startup error**: fix the named setting and rerun `--check`.
+- **Agent failure**: run the agent directly in that folder to see its own error.
+  Nothing is retried automatically, since a run may already have changed files.
+- **Long replies** are split into chunks; a single oversized JSONL record stops
+  the run at `OUTPUT_LIMIT`.
 
 ## Development
 
 ```sh
 .venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m unittest discover -s tests -v
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/ruff check .
-.venv/bin/python -m build
 ```
 
-There are two runtime dependencies: `discord.py` and `python-dotenv`. The single
-runtime module contains validated settings, subprocess execution, reply
-formatting, and the Discord client. Tests exercise real local subprocesses as
-well as mocked Discord delivery; they need no token or network access. CI runs
-tests, lint, and package builds on Linux and macOS.
+Seven modules: `settings` validates configuration, `sessions` owns the SQLite
+channel-to-session map and the lock, `process` spawns and reaps agent processes,
+`runner_codex` and `runner_claude` translate each CLI's JSONL into a shared event
+shape defined in `events`, and `bot` is the Discord client.
+
+The runner tests replay JSONL fixtures captured from real CLIs
+(`tests/fixtures/`), so they fail if an agent's output stops matching. The
+process tests use real subprocesses, including one that verifies a grandchild
+tool does not survive cancellation. No token or network access is needed.
+
+**The Claude runner is covered by fixture tests but has not been exercised
+against live Discord usage** — its argv and event handling are verified against
+`claude 2.1.266`, not against a long real session. Codex is the tested path.
